@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
+import { renameSession } from '@anthropic-ai/claude-agent-sdk';
+
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
@@ -292,6 +294,10 @@ export const sessionsService = {
 
   /**
    * Renames one session by id without requiring the caller to pass provider.
+   *
+   * For Claude sessions that have a JSONL transcript on disk, a {@code custom-title}
+   * event is also appended so the rename is visible to CLI {@code /resume} and
+   * survives a full re-sync. Other providers write only to the database.
    */
   renameSessionById(sessionId: string, summary: string): { sessionId: string; summary: string } {
     const session = sessionsDb.getSessionById(sessionId);
@@ -303,6 +309,18 @@ export const sessionsService = {
     }
 
     sessionsDb.updateSessionCustomName(sessionId, summary);
+
+    // Mirror the rename into the Claude transcript via SDK so CLI /resume sees it.
+    if (session.provider === 'claude') {
+      renameSession(
+        session.provider_session_id ?? session.session_id,
+        summary,
+        { dir: session.project_path ?? undefined },
+      ).catch(() => {
+        // renameSession is best-effort; the DB already has the rename.
+      });
+    }
+
     return { sessionId, summary };
   },
 };

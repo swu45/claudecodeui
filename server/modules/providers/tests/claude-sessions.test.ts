@@ -307,11 +307,11 @@ test('synchronizeFile falls back to Untitled Claude Session when all sources are
 });
 
 // ---------------------------------------------------------------------------
-// Priority: DB custom_name > JSONL title > history.jsonl
+// Priority: custom-title > ai-title > DB custom_name > history.jsonl
 // ---------------------------------------------------------------------------
 
-test('synchronizeFile preserves existing DB custom_name regardless of JSONL and history.jsonl', { concurrency: false }, async () => {
-  const tmp = await mkdtemp(path.join(os.tmpdir(), 'claude-sync-dbwins-'));
+test('synchronizeFile uses JSONL ai-title even when DB has a stale custom_name', { concurrency: false }, async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'claude-sync-jsonl-wins-'));
   const workspacePath = path.join(tmp, 'workspace');
   await mkdir(workspacePath, { recursive: true });
   const restoreHomeDir = patchHomeDir(tmp);
@@ -325,19 +325,19 @@ test('synchronizeFile preserves existing DB custom_name regardless of JSONL and 
       'utf8',
     );
 
-    // Write session JSONL with competing ai-title.
+    // Write session JSONL with an ai-title.
     await writeSessionJsonl(workspacePath, 'test-session-1.jsonl', [
       JSON.stringify({ type: 'ai-title', aiTitle: 'JSONL ai title', sessionId: 'test-session-1' }),
       JSON.stringify({ type: 'last-prompt', lastPrompt: 'first prompt', sessionId: 'test-session-1' }),
     ]);
 
     await withIsolatedDatabase(async () => {
-      // Pre-seed the DB with a custom_name set via CloudCLI sidebar rename.
+      // Pre-seed the DB with a stale custom_name from a previous sync.
       sessionsDb.createSession(
         'test-session-1',
         'claude',
         workspacePath,
-        'Sidebar custom name',
+        'Stale DB name',
       );
 
       const synchronizer = new ClaudeSessionSynchronizer();
@@ -347,7 +347,92 @@ test('synchronizeFile preserves existing DB custom_name regardless of JSONL and 
 
       assert.ok(result);
       const session = sessionsDb.getSessionById(result!);
-      // DB custom_name must win over JSONL ai-title AND history.jsonl display.
+      // JSONL ai-title must win over stale DB custom_name.
+      assert.equal(session?.custom_name, 'JSONL ai title');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('synchronizeFile uses JSONL custom-title over DB custom_name and ai-title', { concurrency: false }, async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'claude-sync-customtitle-wins-'));
+  const workspacePath = path.join(tmp, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tmp);
+
+  try {
+    const claudeHome = path.join(tmp, '.claude');
+    await mkdir(claudeHome, { recursive: true });
+    await writeFile(path.join(claudeHome, 'history.jsonl'), '', 'utf8');
+
+    // Session JSONL with both custom-title and ai-title to verify priority.
+    await writeSessionJsonl(workspacePath, 'test-session-1.jsonl', [
+      JSON.stringify({ type: 'ai-title', aiTitle: 'AI generated title', sessionId: 'test-session-1' }),
+      JSON.stringify({
+        parentUuid: 'msg-1',
+        isSidechain: false,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+        type: 'assistant',
+        uuid: 'msg-2',
+      }),
+      JSON.stringify({ type: 'custom-title', customTitle: 'Renamed via CLI', sessionId: 'test-session-1' }),
+      JSON.stringify({ type: 'last-prompt', lastPrompt: 'first prompt', sessionId: 'test-session-1' }),
+    ]);
+
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createSession('test-session-1', 'claude', workspacePath, 'Old DB name');
+
+      const synchronizer = new ClaudeSessionSynchronizer();
+      const result = await synchronizer.synchronizeFile(
+        path.join(workspacePath, 'test-session-1.jsonl'),
+      );
+
+      assert.ok(result);
+      const session = sessionsDb.getSessionById(result!);
+      // custom-title must win over DB custom_name AND JSONL ai-title.
+      assert.equal(session?.custom_name, 'Renamed via CLI');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('synchronizeFile falls back to DB custom_name when JSONL has no title events', { concurrency: false }, async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'claude-sync-db-fallback-'));
+  const workspacePath = path.join(tmp, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tmp);
+
+  try {
+    const claudeHome = path.join(tmp, '.claude');
+    await mkdir(claudeHome, { recursive: true });
+    await writeFile(path.join(claudeHome, 'history.jsonl'), '', 'utf8');
+
+    // Session JSONL with NO ai-title, custom-title, or last-prompt.
+    await writeSessionJsonl(workspacePath, 'test-session-1.jsonl', [
+      JSON.stringify({
+        parentUuid: 'msg-1',
+        isSidechain: false,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+        type: 'assistant',
+        uuid: 'msg-2',
+      }),
+    ]);
+
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createSession('test-session-1', 'claude', workspacePath, 'Sidebar custom name');
+
+      const synchronizer = new ClaudeSessionSynchronizer();
+      const result = await synchronizer.synchronizeFile(
+        path.join(workspacePath, 'test-session-1.jsonl'),
+      );
+
+      assert.ok(result);
+      const session = sessionsDb.getSessionById(result!);
+      // DB custom_name is used when JSONL provides no title.
       assert.equal(session?.custom_name, 'Sidebar custom name');
     });
   } finally {

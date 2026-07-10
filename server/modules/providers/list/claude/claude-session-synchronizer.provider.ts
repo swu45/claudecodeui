@@ -133,20 +133,16 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       return null;
     }
 
-    // App-created sessions are keyed by an app id, so disk-discovered provider
-    // ids must be resolved through the provider-id mapping first.
-    const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
-      ?? sessionsDb.getSessionById(parsed.sessionId);
-    const existingSessionName = existingSession?.custom_name;
-    if (existingSessionName && existingSessionName !== 'Untitled Claude Session') {
-      return {
-        ...parsed,
-        sessionName: normalizeSessionName(existingSessionName, 'Untitled Claude Session'),
-      };
-    }
-
+    // Priority: JSONL events > DB custom_name > history.jsonl
+    // custom-title (user /rename) and ai-title (Claude auto-generated) are more
+    // authoritative than the DB cache, which may be stale from a previous sync.
     let sessionName = await this.extractSessionAiTitleFromEnd(filePath, parsed.sessionId);
     if (!sessionName) {
+      const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
+        ?? sessionsDb.getSessionById(parsed.sessionId);
+      sessionName = existingSession?.custom_name ?? undefined;
+    }
+    if (!sessionName || sessionName === 'Untitled Claude Session') {
       sessionName = nameMap.get(parsed.sessionId);
     }
 
