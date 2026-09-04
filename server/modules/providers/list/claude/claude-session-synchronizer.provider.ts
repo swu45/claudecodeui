@@ -26,10 +26,11 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
   private readonly claudeHome = path.join(os.homedir(), '.claude');
 
   /**
-   * Returns true when a JSONL file is a subagent transcript rather than a
-   * top-level session.
+   * Returns true when a JSONL file is a subagent transcript or tool result
+   * rather than a top-level session.
    *
-   * Claude stores subagent transcripts under a `subagents/` directory, e.g.
+   * Claude stores subagent transcripts under a `subagents/` directory and
+   * tool results under a `tool-results/` directory, e.g.
    * `~/.claude/projects/<encoded-cwd>/<session-id>/subagents/agent-<id>.jsonl`.
    * Those files repeat the parent session's `sessionId`, so indexing them as
    * standalone sessions overwrites the parent row's `jsonl_path` and corrupts
@@ -37,7 +38,8 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
    * them, so both entry points must skip them.
    */
   private isSubagentTranscript(filePath: string): boolean {
-    return path.normalize(filePath).split(path.sep).includes('subagents');
+    const pathParts = path.normalize(filePath).split(path.sep);
+    return pathParts.includes('subagents') || pathParts.includes('tool-results');
   }
 
   /**
@@ -145,7 +147,7 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
       };
     }
 
-    let sessionName = await this.extractSessionAiTitleFromEnd(filePath, parsed.sessionId);
+    let sessionName = await this.extractSessionTitle(filePath, parsed.sessionId);
     if (!sessionName) {
       sessionName = nameMap.get(parsed.sessionId);
     }
@@ -157,22 +159,16 @@ export class ClaudeSessionSynchronizer implements IProviderSessionSynchronizer {
   }
 
   /**
-   * Extracts the best available title from the JSONL transcript.
+   * Returns the best available title for one session from its transcript.
    *
-   * Scans every line in the file (forward, not reverse), collecting
-   * {@code custom-title}, {@code ai-title}, and {@code last-prompt} events
-   * that match {@code sessionId}. Returns the highest-priority value found:
+   * Scans forward keeping the last match of each event type, then prefers
+   * `custom-title` (a manual `/rename`) over `ai-title` over `last-prompt`.
+   * Claude writes `custom-title` immediately before `ai-title`, so a reverse
+   * scan that returns its first hit would always lose the manual rename.
    *
-   * <pre>
-   * custom-title  →  user-renamed via /rename
-   * ai-title      →  Claude Code auto-generated
-   * last-prompt   →  last user message (fallback)
-   * </pre>
-   *
-   * Silently returns {@code undefined} when the file is missing or unreadable
-   * so the synchronizer can continue with the remaining sessions.
+   * Returns undefined on a missing or unreadable file so sync can continue.
    */
-  private async extractSessionAiTitleFromEnd(
+  private async extractSessionTitle(
     filePath: string,
     sessionId: string
   ): Promise<string | undefined> {
